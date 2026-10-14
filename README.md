@@ -1,39 +1,86 @@
 # Order Sync Lab
 
-A small Python/SQLite portfolio integration that moves synthetic sales orders to a mock ERP over HTTP. Demonstrates input mapping, exact money arithmetic, duplicate prevention, bounded retries, failed-record quarantine and reconciliation.
+A Python and SQLite integration project that synchronizes synthetic sales orders with a mock ERP through a REST API. It demonstrates practical approaches to reliable data delivery: validation, monetary precision, duplicate prevention, bounded retries, and reconciliation.
 
-**This is an adjacent ERP integration exercise, not a NetSuite implementation.** No NetSuite SDK, account, SuiteScript execution or live ERP credentials are used. Created with Codex assistance; review the code and exercises before discussing it as portfolio work.
+**Stack:** Python 3.11+ · SQLite · HTTP/JSON · `unittest`  
+**Dependencies:** Python standard library only
 
-## Run (Python 3.11+; standard library only)
+## What it demonstrates
+
+- **Data mapping and validation:** Convert source orders into an ERP-facing schema and reject malformed quantities, identifiers, and prices.
+- **Financial precision:** Parse decimal prices and store monetary values as integer cents.
+- **Duplicate prevention:** Use stable external order IDs in the outbox and an idempotency key at the mock API. Conflicting payloads are rejected rather than silently overwritten.
+- **Failure handling:** Retry transient HTTP/network failures within a fixed attempt budget, using exponential delays. Retain failed records for inspection.
+- **Reconciliation:** Compare successfully delivered records with remote data to identify missing or changed orders.
+- **Automated verification:** Eight tests cover validation, duplicate conflicts, HTTP retries, remote idempotency, permanent failures, exhausted retry budgets, and reconciliation.
+
+## Quick start
 
 ```sh
+git clone https://github.com/dfromm91/order-sync-lab.git
+cd order-sync-lab
 python3 -m unittest -v
 python3 demo.py
 ```
 
-The demo starts a loopback-only HTTP server on a random port, injects one 503 error, submits the same source order twice, sends a single remote record after retry, and reconciles totals. Expected: `sent`, 2 attempts, 5985 total cents and no reconciliation issues. No external requests or real data.
+The demo starts a local HTTP server on a dynamically assigned port, injects a temporary HTTP 503 failure, and enqueues the same source order twice. The delivery worker retries successfully, creates one remote record, and verifies that it matches the source.
+
+Expected result:
+
+```json
+{
+  "outbox": [["DEMO-001", "sent", 2]],
+  "erp_orders": [{
+    "customer_ref": "SYNTHETIC-CUSTOMER",
+    "external_id": "DEMO-001",
+    "item_ref": "SENSOR-A",
+    "quantity": 3,
+    "total_cents": 5985,
+    "unit_price_cents": 1995
+  }],
+  "reconciliation": []
+}
+```
+
+All demo data is synthetic. The server listens on loopback, and the demo makes no external API requests.
 
 ## Architecture
 
-Source -> validate/map -> SQLite outbox -> REST adapter -> mock ERP -> reconciliation.
+```text
+Source order
+    -> Validate and map
+    -> SQLite outbox
+    -> REST delivery worker
+    -> Mock ERP
+    -> Reconciliation report
+```
 
-- `sync.py`: domain mapping, durable SQLite schema, sequential delivery worker and REST adapter.
-- `demo.py`: mock HTTP API and end-to-end scenario.
-- `test_sync.py`: money/quantity validation, duplicate conflict, HTTP retry, remote idempotency, permanent failures, exhausted retry budget, missing/mismatched records.
-- `connect('orders.db')` uses a persistent database; the repeatable demo uses memory.
+| File | Responsibility |
+| --- | --- |
+| `sync.py` | Validation, mapping, SQLite outbox, HTTP client, delivery worker, and reconciliation |
+| `demo.py` | Local mock ERP API and executable end-to-end scenario |
+| `test_sync.py` | Automated tests for data correctness and delivery behavior |
 
-The external order ID is a stable identity. A changed payload with the same ID is rejected instead of silently overwriting an order. Decimal input is converted to integer cents. Transient HTTP errors retry with bounded exponential delays. Remote idempotency is essential: an ERP might accept an order before the response is lost. Reconciliation compares full mapped records, including totals.
+The outbox records payloads, delivery state, attempt counts, and errors. `connect('orders.db')` provides file-backed persistence; the repeatable demo and tests use an in-memory database.
 
-## Limits and next steps
+## Design decisions
 
-This is a sequential training worker, not a production service. No authentication, concurrent workers, pagination, server-side persistent idempotency, inventory reservations, updates/cancellations or reconciliation of unexpected remote records. A failed row is retained for inspection; manual replay is not implemented. The mock's in-memory records disappear on restart. Production integration needs OAuth, secret management, rate-limit/Retry-After handling, backoff jitter, durable remote idempotency, monitoring, schema contracts and accounting review. Never point it at a live financial system without implementing and validating these controls.
+**Stable identity across delivery attempts.** An order's external ID identifies it throughout the pipeline. Re-enqueuing an identical order is a no-op; reusing the ID with different data raises a conflict. The REST client sends a deterministic idempotency key to address duplicate delivery at the receiving system.
 
-## Interview preparation (about 2 evenings)
+**Exact money arithmetic.** Prices enter as decimal strings and become integer cents. Values with fractional cents are rejected, avoiding silent rounding.
 
-1. Trace DEMO-001 from source fields to JSON and explain why 19.95 * 3 becomes 5985 cents.
-2. Explain why local duplicate detection alone cannot prevent a remote duplicate after a timeout. Add a test simulating an accepted order followed by a lost response.
-3. Add a second synthetic order and an invalid SKU. Explain the permanent-versus-transient error decision.
-4. Change a remote total and show reconciliation identifying the mismatch.
-5. Read Oracle NetSuite REST web services documentation. Sketch where authentication, record mapping, pagination and rate limits would change this adapter. Do not claim hands-on NetSuite experience from this lab.
+**Explicit failure states.** Transient errors receive bounded retries; permanent errors and exhausted retries leave failed records available for inspection. A successful HTTP response marks a record as sent, while reconciliation separately checks the resulting remote data.
 
-A truthful portfolio bullet: “Implemented a Python/SQLite order-integration lab with a mock ERP REST API, idempotent delivery, bounded retries, exact monetary mapping, and reconciliation tests.”
+**A small, inspectable implementation.** Standard-library components keep setup lightweight and make the integration behavior easy to trace from source record to HTTP request and database state.
+
+## Scope and future development
+
+This project models an ERP integration using a mock API. It does not connect to NetSuite or any other live ERP platform.
+
+The worker is sequential, and the mock API stores records and idempotency state in memory. Authentication, concurrent delivery, manual replay, pagination, inventory reservations, order updates/cancellations, and detection of unexpected remote records are outside the current scope.
+
+Potential extensions include PostgreSQL-backed storage, OAuth2 authentication, durable remote idempotency, webhook ingestion, Retry-After handling, backoff jitter, and operational monitoring.
+
+## Development
+
+Created with Codex assistance. The repository contains the runnable implementation, automated tests, and a local demonstration so its behavior can be inspected and reproduced.
